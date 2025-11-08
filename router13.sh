@@ -1,5 +1,5 @@
 #!/bin/sh
-# Road-Warrior for OpenWrt 24.10.x (x86_64)
+# Road-Warrior for OpenWrt 24.10.x (x86_64) - FIXED VERSION
 # OpenVPN (no-enc) + Passwall GUI + TPROXY (TCP/UDP/QUIC/WEBTRANSPORT/DNS) + автоматические проверки
 
 say()  { printf "\\033[1;32m[RW]\\033[0m %s\\n" "$*"; }
@@ -137,7 +137,7 @@ opkg remove dnsmasq 2>/dev/null || true
 install_package "dnsmasq-full" || true
 
 # Сетевые утилиты
-for pkg in nftables kmod-nft-tproxy nftables-json iptables-nft iptables-mod-nat-extra; do
+for pkg in nftables kmod-nft-tproxy nftables-json iptables-nft iptables-mod-nat-extra kmod-nft-connatrack; do
   install_package "$pkg" || true
 done
 
@@ -256,7 +256,6 @@ say "=== Настраиваем OpenVPN ==="
 ask_var "Порт OpenVPN (UDP)" OPORT "1194"
 ask_var "Имя VPN-клиента" CLIENT "client1"
 ask_var "VPN IPv4 подсеть" VPN4_NET "10.99.0.0/24"
-ask_var "VPN IPv6 подсеть" VPN6_NET "fd42:4242:4242:1::/64"
 
 # Генерация PKI с правильными расширениями
 say "Генерируем сертификаты с правильными расширениями..."
@@ -326,7 +325,7 @@ EOF
 # TLS ключ
 openvpn --genkey secret "$OVPN_PKI/tc.key" 2>/dev/null && say "✓ TLS ключ создан"
 
-# Конфигурация OpenVPN
+# Конфигурация OpenVPN (БЕЗ IPv6!)
 OVPN4="${VPN4_NET%/*}"
 MASK4="$(cidr2mask "$VPN4_NET")"
 
@@ -339,7 +338,6 @@ uci set openvpn.rw.proto='udp'
 uci set openvpn.rw.port="$OPORT"
 uci set openvpn.rw.topology='subnet'
 uci set openvpn.rw.server="$OVPN4 $MASK4"
-uci set openvpn.rw.server_ipv6="$VPN6_NET"
 uci set openvpn.rw.keepalive='10 60'
 uci set openvpn.rw.persist_key='1'
 uci set openvpn.rw.persist_tun='1'
@@ -353,7 +351,7 @@ uci set openvpn.rw.ca="$OVPN_PKI/ca.crt"
 uci set openvpn.rw.cert="$OVPN_PKI/server.crt"
 uci set openvpn.rw.key="$OVPN_PKI/server.key"
 uci set openvpn.rw.dh='none'
-uci add_list openvpn.rw.push='redirect-gateway def1 ipv6'
+uci add_list openvpn.rw.push='redirect-gateway def1'
 uci add_list openvpn.rw.push='dhcp-option DNS 8.8.8.8'
 uci add_list openvpn.rw.push='dhcp-option DNS 1.1.1.1'
 uci set openvpn.rw.tls_crypt="$OVPN_PKI/tc.key"
@@ -363,7 +361,7 @@ uci commit openvpn
 /etc/init.d/openvpn start
 say "✓ OpenVPN сервер запущен"
 
-# ---------- 6) Настройка Firewall и NAT ----------
+# ---------- 6) Настройка Firewall и NAT с исправлениями ----------
 say "=== Настраиваем Firewall ==="
 
 # Создаем интерфейс VPN
@@ -401,18 +399,24 @@ uci set firewall.@rule[-1].target='ACCEPT'
 
 uci commit firewall
 
-# Настраиваем NAT
-say "Настраиваем NAT..."
-iptables -t nat -F
-iptables -t nat -A POSTROUTING -s 10.99.0.0/24 -o "$DET_WAN" -j MASQUERADE
+# Настраиваем NAT и форвардинг через iptables
+say "Настраиваем NAT и форвардинг..."
+iptables -t nat -F POSTROUTING
+iptables -F FORWARD
 
-/etc/init.d/firewall restart
-say "✓ Firewall настроен"
+# Добавляем правила FORWARD
+iptables -A FORWARD -i tun0 -o "$DET_WAN" -j ACCEPT
+iptables -A FORWARD -i "$DET_WAN" -o tun0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Добавляем NAT
+iptables -t nat -A POSTROUTING -s "$VPN4_NET" -o "$DET_WAN" -j MASQUERADE
 
 # Включаем форвардинг
 echo 1 > /proc/sys/net/ipv4/ip_forward
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
+
+/etc/init.d/firewall restart
+say "✓ Firewall настроен"
 
 # ---------- 7) Настройка Passwall TPROXY ----------
 say "=== Настраиваем Passwall TPROXY ==="
@@ -569,6 +573,11 @@ else
   warn "✗ OVPN файл не создан в веб-директории"
 fi
 
+# Проверяем правила iptables
+say "Проверяем правила форвардинга и NAT..."
+iptables -L FORWARD -n >/dev/null 2>&1 && say "✓ FORWARD цепочка настроена"
+iptables -t nat -L POSTROUTING -n >/dev/null 2>&1 && say "✓ NAT настроен"
+
 # ---------- 10) Итоговая информация ----------
 say "=== НАСТРОЙКА ЗАВЕРШЕНА ==="
 echo ""
@@ -590,8 +599,9 @@ echo "📋 КОМАНДЫ ДЛЯ ПРОВЕРКИ:"
 echo "================================"
 echo "Статус OpenVPN: /etc/init.d/openvpn status"
 echo "Логи OpenVPN: logread | grep openvpn"
-echo "Подключенные клиенты: cat /tmp/openvpn-status.log"
 echo "Статус Passwall: /etc/init.d/passwall status"
+echo "Правила форвардинга: iptables -L FORWARD -n -v"
+echo "Правила NAT: iptables -t nat -L -n -v"
 echo ""
 echo "⚠️  ВАЖНЫЕ ЗАМЕЧАНИЯ:"
 echo "================================"
@@ -599,6 +609,20 @@ echo "1. Passwall отключен по умолчанию - включите е
 echo "2. При первом включении Passwall добавьте ноду 'Direct' для тестирования"
 echo "3. Весь трафик через VPN будет идти через выбранные в Passwall прокси"
 echo "4. TPROXY перехватывает TCP/UDP/QUIC/WEBTRANSPORT/DNS трафик"
+echo "5. IPv6 отключен в OpenVPN для стабильной работы"
 
 say "Скачайте конфиг по ссылке: https://$PUB_IP/vpn/"
 say "Для входа в LuCI используйте: root / $ROOT_PW$RANDOM_PW"
+
+# Сохраняем правила для перезагрузки
+say "Сохраняем правила firewall..."
+cat > /etc/firewall.user << 'EOF'
+#!/bin/sh
+# VPN Forwarding rules
+iptables -A FORWARD -i tun0 -o br-lan -j ACCEPT
+iptables -A FORWARD -i br-lan -o tun0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.99.0.0/24 -o br-lan -j MASQUERADE
+EOF
+
+chmod +x /etc/firewall.user
+say "✓ Правила сохранены в /etc/firewall.user"
