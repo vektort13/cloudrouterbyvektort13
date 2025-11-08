@@ -375,6 +375,7 @@ uci set network.@interface[-1].proto='none'
 uci set network.@interface[-1].auto='1'
 uci rename network.@interface[-1]='vpn'
 uci commit network
+/etc/init.d/network reload
 
 # Зона VPN
 uci -q delete firewall.vpn
@@ -411,6 +412,8 @@ uci commit firewall
 uci set openvpn.rw.status='/tmp/openvpn-status.log'
 uci set openvpn.rw.log='/tmp/openvpn.log'
 uci set openvpn.rw.verb='3'
+uci commit openvpn
+/etc/init.d/openvpn restart
 
 /etc/init.d/firewall restart
 say "✓ Firewall настроен"
