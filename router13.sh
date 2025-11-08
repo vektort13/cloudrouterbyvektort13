@@ -1,3 +1,4 @@
+cat >/root/road-warrior.sh <<'EOF'
 #!/bin/sh
 # Road-Warrior for OpenWrt 24.10.x (x86_64)
 # LuCI + luci-app-xray + Xray(TPROXY+DNS) + OpenVPN no-enc + IPv6 + TTL
@@ -16,7 +17,7 @@ cidr2mask() { # "10.99.0.0/24" -> "255.255.255.0"
 wan_zone_idx() { uci show firewall 2>/dev/null | sed -n "s/^firewall\.@zone\[\([0-9]\+\)\]\.name='wan'.*/\1/p" | head -n1; }
 
 # ---------- 0) WAN autodetect ----------
-WAN_IF="$(ubus call network.interface.wan status 2>/dev/null | sed -n 's/.*"l3_device":"\([^"]*\)".*/\1/p')"
+WAN_IF="$(ubus call network.interface.wan status 2>/dev/null | sed -n 's/.*\"l3_device\":\"\([^\"]*\)\".*/\1/p')"
 [ -z "$WAN_IF" ] && WAN_IF="$(ip route | awk '/default/ {print $5; exit}')"
 [ -z "$WAN_IF" ] && WAN_IF="eth0"
 has_v4() { ip -4 addr show dev "$WAN_IF" | grep -q 'inet '; }
@@ -45,7 +46,7 @@ opkg install -V1 luci luci-ssl ca-bundle curl wget jq ip-full openssl-util
 opkg remove dnsmasq 2>/dev/null || true
 opkg install dnsmasq-full
 opkg install xray-core xray-geodata 2>/dev/null || true
-opkg install nftables kmod-nft-tproxy
+opkg install nftables kmod-nft-tproxy nftables-json
 opkg install openvpn-openssl
 opkg install nano 2>/dev/null || true
 
@@ -116,7 +117,7 @@ chmod +x /etc/hotplug.d/iface/99-xray-tproxy
 
 # ---------- 7) nft TPROXY (fw4 include; IPv4+IPv6) ----------
 say "Вкатываю nft-правила TPROXY (fw4 include на tun0 → :12345)"
-# Не грузим напрямую через `nft -f` — fw4 сам подхватит include при рестарте firewall.
+mkdir -p /etc/nftables.d
 cat >/etc/nftables.d/90-xray-tproxy.nft <<'NFT'
 # Этот файл включается ВНУТРЬ "table inet fw4 { ... }"
 # поэтому НЕЛЬЗЯ писать "table inet ..." здесь.
@@ -152,35 +153,33 @@ chain xray_accept_mark {
   meta mark 0x1 accept
 }
 NFT
-# загрузит fw4:
-#/usr/sbin/nft -f /etc/nftables.d/90-xray-tproxy.nft  # НЕ нужно!
 /etc/init.d/firewall restart
 
 # ---------- 8) OpenVPN (UDP/TUN) no-enc + PKI ----------
 say "Ставлю openvpn-easy-rsa (если есть), иначе PKI через OpenSSL (fallback)"
 if opkg install openvpn-easy-rsa 2>/dev/null; then
   say "EasyRSA найден — генерю PKI"
-  [ -d /etc/easy-rsa/pki ] || easyrsa init-pki
-  [ -f /etc/easy-rsa/pki/ca.crt ] || easyrsa build-ca nopass
-  [ -f /etc/easy-rsa/pki/issued/server.crt ] || easyrsa build-server-full server nopass
+  export EASYRSA_BATCH=1
+  export EASYRSA_PKI=/etc/easy-rsa/pki
+  mkdir -p "$EASYRSA_PKI"
+  easyrsa init-pki
+  [ -f "$EASYRSA_PKI/ca.crt" ] || easyrsa build-ca nopass
+  [ -f "$EASYRSA_PKI/issued/server.crt" ] || easyrsa build-server-full server nopass
   CLIENT="${CLIENT:-client1}"
-  [ -f /etc/easy-rsa/pki/issued/${CLIENT}.crt ] || easyrsa build-client-full ${CLIENT} nopass
+  [ -f "$EASYRSA_PKI/issued/${CLIENT}.crt" ] || easyrsa build-client-full "${CLIENT}" nopass
   mkdir -p /etc/openvpn/pki
-  cp -r /etc/easy-rsa/pki/* /etc/openvpn/pki/
+  cp -r "$EASYRSA_PKI"/* /etc/openvpn/pki/
 else
   warn "openvpn-easy-rsa недоступен — делаю PKI через OpenSSL (self-signed CA)"
   OVPN_PKI=/etc/openvpn/pki
   mkdir -p "$OVPN_PKI"
-  # CA
   openssl genrsa -out "$OVPN_PKI/ca.key" 4096
   openssl req -x509 -new -nodes -key "$OVPN_PKI/ca.key" -sha256 -days 3650 \
     -subj "/CN=OpenWrt-CA" -out "$OVPN_PKI/ca.crt"
-  # Server
   openssl genrsa -out "$OVPN_PKI/server.key" 4096
   openssl req -new -key "$OVPN_PKI/server.key" -subj "/CN=server" -out "$OVPN_PKI/server.csr"
   openssl x509 -req -in "$OVPN_PKI/server.csr" -CA "$OVPN_PKI/ca.crt" -CAkey "$OVPN_PKI/ca.key" \
     -CAcreateserial -out "$OVPN_PKI/server.crt" -days 3650 -sha256
-  # Client
   CLIENT="${CLIENT:-client1}"
   openssl genrsa -out "$OVPN_PKI/${CLIENT}.key" 4096
   openssl req -new -key "$OVPN_PKI/${CLIENT}.key" -subj "/CN=${CLIENT}" -out "$OVPN_PKI/${CLIENT}.csr"
@@ -238,7 +237,6 @@ verb 3
 data-ciphers none
 data-ciphers-fallback none
 auth none
-
 <tls-crypt>
 $(cat /etc/openvpn/pki/tc.key 2>/dev/null)
 </tls-crypt>
@@ -316,6 +314,7 @@ esac
 
 if [ -n "$TTL_RULE" ]; then
   say "Применяю TTL/HopLimit на исходящем (${WAN_IF})"
+  mkdir -p /etc/nftables.d
   cat >/etc/nftables.d/95-ttlfix.nft <<NFT2
 # Вставляется внутрь table inet fw4
 chain xrl_ttl_post {
@@ -335,3 +334,7 @@ echo "LuCI (HTTPS): https://${IP4}"
 echo "Xray GUI: LuCI → Services → Xray → добавь свой прокси (Node) и включи Transparent Proxy (TCP+UDP)"
 echo "OpenVPN клиентский профиль: /root/${CLIENT}.ovpn  (используй OpenVPN GUI 2.5/2.6; Connect v3 не поддерживает no-enc)"
 echo "Логи: Xray /var/log/xray/*.log | nft: 'nft list ruleset' | OpenVPN: 'logread -e openvpn'"
+EOF
+
+chmod +x /root/road-warrior.sh
+/root/road-warrior.sh
