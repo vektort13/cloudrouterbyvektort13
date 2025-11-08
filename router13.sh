@@ -2,8 +2,9 @@
 # Road-Warrior for OpenWrt 24.10.x (x86_64)
 # LuCI + (опц.) Passwall GUI + Xray(TPROXY+DNS) + OpenVPN (no-enc) + IPv6 + интерактив TTL
 
-say()  { printf "\033[1;32m[RW]\033[0m %s\n" "$*"; }
-warn() { printf "\033[1;33m[RW]\033[0m %s\n" "$*"; }
+say()  { printf "\\033[1;32m[RW]\\033[0m %s\\n" "$*"; }
+warn() { printf "\\033[1;33m[RW]\\033[0m %s\\n" "$*"; }
+err()  { printf "\\033[1;31m[RW]\\033[0m %s\\n" "$*"; }
 
 # ---------- helpers ----------
 ask_var() { # ask_var "Вопрос" VAR "дефолт"
@@ -20,7 +21,8 @@ ask_yn() { # ask_yn "Вопрос" "Y|N"
   [ -z "$a" ] && a="$def"
   case "$a" in Y|y) return 0;; *) return 1;; esac
 }
-cidr2mask() { bits="${1#*/}"; [ -z "$bits" ] && { echo 255.255.255.0; return; }
+cidr2mask() { 
+  bits="${1#*/}"; [ -z "$bits" ] || [ "$bits" = "$1" ] && { echo 255.255.255.0; return; }
   m=0; i=0; while [ $i -lt 32 ]; do [ $i -lt "$bits" ] && m=$((m | (1<<(31-i)))); i=$((i+1)); done
   printf "%d.%d.%d.%d" $(( (m>>24)&255 )) $(( (m>>16)&255 )) $(( (m>>8)&255 )) $(( m&255 ))
 }
@@ -67,8 +69,13 @@ cp /etc/opkg/distfeeds.conf /etc/opkg/distfeeds.conf.bak 2>/dev/null || true
 sed -i 's#https://downloads.openwrt.org/releases/[0-9.]\+/packages/x86_64/#https://downloads.openwrt.org/releases/packages-24.10/x86_64/#g' /etc/opkg/distfeeds.conf
 opkg update || true
 
-opkg install -V1 luci luci-ssl ca-bundle curl wget jq ip-full openssl-util luci-compat || true
-opkg remove dnsmasq 2>/dev/null || true; opkg install dnsmasq-full || true
+for pkg in luci luci-ssl ca-bundle curl wget jq ip-full openssl-util luci-compat; do
+  opkg install -V1 "$pkg" || true
+done
+
+opkg remove dnsmasq 2>/dev/null || true
+opkg install dnsmasq-full || true
+
 opkg install xray-core || true
 opkg install v2ray-geoip v2ray-geosite 2>/dev/null || opkg install xray-geodata 2>/dev/null || true
 opkg install nftables kmod-nft-tproxy nftables-json || true
@@ -79,79 +86,96 @@ opkg install nano 2>/dev/null || true
 # ---------- 2) WAN bring‑up при необходимости ----------
 if ! has_v4; then
   warn "IPv4 на $WAN_IF не получен — настраиваю WAN=DHCP"
-  uci -q delete network.wan; uci -q delete network.wan6
-  uci set network.wan='interface'; uci set network.wan.device="$WAN_IF"; uci set network.wan.proto='dhcp'
-  uci commit network; /etc/init.d/network restart; sleep 4
+  uci -q delete network.wan
+  uci -q delete network.wan6
+  uci set network.wan='interface'
+  uci set network.wan.device="$WAN_IF"
+  uci set network.wan.proto='dhcp'
+  uci commit network
+  /etc/init.d/network restart
+  sleep 4
 fi
 
 # ---------- 3) Passwall фиды (SourceForge) + установка ----------
 add_passwall_feeds() {
-  # подчистить старые записи в обоих файлах
+  # Очистка старых записей
   for f in /etc/opkg/customfeeds.conf /etc/opkg/custom.conf; do
-    [ -f "$f" ] || continue
-    sed -i '/openwrt-passwall-build/d;/passwall_packages/d;/passwall_luci/d;/passwall2/d' "$f"
+    [ -f "$f" ] && sed -i '/openwrt-passwall-build/d;/passwall_packages/d;/passwall_luci/d;/passwall2/d' "$f"
   done
 
-  # читаем релиз/арх
+  # Определение релиза и архитектуры
   . /etc/openwrt_release 2>/dev/null || true
-  REL="${DISTRIB_RELEASE:-24.10}"           # например 24.10.4
-  RELMAJ="${REL%.*}"                        # -> 24.10
-  ARCH="${DISTRIB_ARCH:-$(uname -m)}"       # x86_64
+  REL="${DISTRIB_RELEASE:-24.10}"
+  RELMAJ="${REL%.*}"
+  ARCH="${DISTRIB_ARCH:-$(uname -m)}"
 
-  # база SourceForge (реальный бинарный фид)
+  # База SourceForge
   SF_BASE="https://downloads.sourceforge.net/project/openwrt-passwall-build/releases/packages-${RELMAJ}/${ARCH}"
 
-  # добавить ключ подписи (если не скачался — не падаем)
+  # Загрузка ключа подписи
   mkdir -p /etc/opkg/keys
-  for U in \
-    "https://downloads.sourceforge.net/project/openwrt-passwall-build/passwall.pub" \
-    "https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub"
-  do
-    uclient-fetch -q -T 20 -O /etc/opkg/keys/passwall.pub "$U" && break
-    wget -q -O /etc/opkg/keys/passwall.pub "$U" && break
-  done
-  opkg-key add /etc/opkg/keys/passwall.pub >/dev/null 2>&1 || true
+  PASSWALL_KEY_URL="https://raw.githubusercontent.com/xiaorouji/openwrt-passwall/main/signing.key"
+  if uclient-fetch -q -T 20 -O /etc/opkg/keys/passwall.pub "$PASSWALL_KEY_URL" 2>/dev/null || \
+     wget -q -O /etc/opkg/keys/passwall.pub "$PASSWALL_KEY_URL" 2>/dev/null; then
+    say "Ключ Passwall успешно загружен"
+    opkg-key add /etc/opkg/keys/passwall.pub >/dev/null 2>&1 || true
+  else
+    warn "Не удалось скачать ключ подписи - возможны ошибки верификации пакетов"
+  fi
 
-  # детектируем реально существующие каталоги
+  # Проверка доступности фидов
   ADDED=0
   for d in passwall_packages passwall_luci passwall2; do
-    if uclient-fetch -q -T 15 -O /dev/null "$SF_BASE/$d/Packages.gz"; then
+    if uclient-fetch -q -T 15 -O /dev/null "$SF_BASE/$d/Packages.gz" 2>/dev/null; then
       echo "src/gz $d $SF_BASE/$d" >> /etc/opkg/customfeeds.conf
-      ADDED=1
+      say "Добавлен фид: $d"
+      ADDED=$((ADDED + 1))
     fi
   done
 
-  [ "$ADDED" -eq 1 ] || return 1
-  return 0
+  [ "$ADDED" -gt 0 ] && return 0
+  return 1
 }
 
 install_passwall_from_feed() {
   opkg update || return 1
-  opkg install luci-app-passwall 2>/dev/null || opkg install luci-app-passwall2 2>/dev/null || return 2
-  return 0
+  if opkg install luci-app-passwall 2>/dev/null; then
+    say "Passwall установлен успешно"
+    return 0
+  elif opkg install luci-app-passwall2 2>/dev/null; then
+    say "Passwall2 установлен успешно"  
+    return 0
+  else
+    return 2
+  fi
 }
 
 install_passwall_fallback_zip() {
-  # большой ZIP; ставим только если согласился
-  say "Fallback: тяну ZIP из GitHub releases (passwall2), это 60–70 MB…"
-  URL="$(curl -fsSL -H 'User-Agent: curl' https://api.github.com/repos/xiaorouji/openwrt-passwall2/releases/latest \
-        | jq -r '.assets[]?|select(.name|test("passwall_packages_ipk_x86_64.zip$")).browser_download_url')"
+  say "Пробую установить из ZIP (GitHub releases)..."
+  URL="$(curl -fsSL -H 'User-Agent: curl' https://api.github.com/repos/xiaorouji/openwrt-passwall2/releases/latest 2>/dev/null | \
+        jq -r '.assets[]?|select(.name|test("passwall_packages_ipk_x86_64.zip$")).browser_download_url' 2>/dev/null)"
+  
   [ -n "$URL" ] || return 1
+  
   mkdir -p /tmp/pw
-  uclient-fetch -T 300 -O /tmp/pw/pw.zip "$URL" || wget -O /tmp/pw/pw.zip "$URL" || return 2
-  (cd /tmp/pw && unzip -o pw.zip >/dev/null 2>&1) || return 3
-  opkg install /tmp/pw/*.ipk || true
-  return 0
+  if uclient-fetch -T 300 -O /tmp/pw/pw.zip "$URL" 2>/dev/null || \
+     wget -O /tmp/pw/pw.zip "$URL" 2>/dev/null; then
+    (cd /tmp/pw && unzip -o pw.zip >/dev/null 2>&1) || return 3
+    opkg install /tmp/pw/*.ipk 2>/dev/null || true
+    rm -rf /tmp/pw
+    return 0
+  fi
+  return 2
 }
 
 if [ "$INSTALL_PW" -eq 1 ]; then
-  say "Добавляю фиды Passwall и ставлю GUI"
+  say "Пробую установить Passwall..."
   if add_passwall_feeds && install_passwall_from_feed; then
-    say "Passwall GUI установлен из фида."
+    say "Passwall GUI установлен из фида"
   else
-    warn "Из фида не встало."
-    if ask_yn "Пробовать ZIP‑fallback из GitHub (большой файл)?" "N"; then
-      install_passwall_fallback_zip || warn "ZIP‑fallback тоже не удался. Можно поставить ipk вручную."
+    warn "Не удалось установить из фидов"
+    if ask_yn "Попробовать установить из ZIP (большой файл)?" "N"; then
+      install_passwall_fallback_zip && say "Passwall установлен из ZIP" || warn "ZIP установка не удалась"
     fi
   fi
 fi
@@ -161,7 +185,7 @@ fi
 /etc/init.d/uhttpd start  >/dev/null 2>&1
 
 # ---------- 5) Xray: TPROXY + DNS ----------
-say "Пишу /etc/xray/config.json (TPROXY:12345 + Xray DNS)"
+say "Настраиваю Xray (TPROXY:12345 + DNS)"
 mkdir -p /etc/xray /var/log/xray
 cat >/etc/xray/config.json <<'JSON'
 {
@@ -178,21 +202,26 @@ cat >/etc/xray/config.json <<'JSON'
     { "tag": "dns-out", "protocol": "dns", "settings": { "address": "8.8.8.8" } }
   ],
   "dns": { "servers": [ "8.8.8.8", "1.1.1.1", "https+local://dns.cloudflare.com/dns-query" ] },
-  "routing": { "domainStrategy": "IPIfNonMatch",
-    "rules": [{ "type": "field", "inboundTag": ["tproxy-in"], "port": 53, "outboundTag": "dns-out" }] }
+  "routing": { 
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [{ "type": "field", "inboundTag": ["tproxy-in"], "port": 53, "outboundTag": "dns-out" }]
+  }
 }
 JSON
+
 /etc/init.d/xray enable >/dev/null 2>&1
 /etc/init.d/xray restart >/dev/null 2>&1
 
-# ---------- 6) Policy routing под TPROXY ----------
-say "Policy routing: fwmark 0x1 -> table 100 (local dev lo)"
+# ---------- 6) Policy routing для TPROXY ----------
+say "Настраиваю policy routing (fwmark 0x1 -> table 100)"
 ip rule add fwmark 0x1 table 100 2>/dev/null || true
 ip route add local 0.0.0.0/0 dev lo table 100 2>/dev/null || true
 ip -6 rule add fwmark 0x1 table 100 2>/dev/null || true
 ip -6 route add local ::/0 dev lo table 100 2>/dev/null || true
+
 mkdir -p /etc/hotplug.d/iface
 cat >/etc/hotplug.d/iface/99-xray-tproxy <<'HPL'
+#!/bin/sh
 [ "$ACTION" = ifup ] || exit 0
 case "$INTERFACE" in
   wan|vpn)
@@ -205,28 +234,38 @@ esac
 HPL
 chmod +x /etc/hotplug.d/iface/99-xray-tproxy
 
-# ---------- 7) nft TPROXY include (fw4; IPv4+IPv6) ----------
-say "Вкатываю nft‑правила TPROXY (prerouting на tun0 → :12345)"
+# ---------- 7) nft TPROXY правила ----------
+say "Добавляю nftables правила TPROXY"
 mkdir -p /etc/nftables.d
 cat >/etc/nftables.d/90-xray-tproxy.nft <<'NFT'
 # Этот файл включается внутрь table inet fw4
-set xray_v4_skip { type ipv4_addr; flags interval; elements = {
-  127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 240.0.0.0/4
-} }
-set xray_v6_skip { type ipv6_addr; flags interval; elements = { ::1/128, fc00::/7, fe80::/10, ff00::/8 } }
+set xray_v4_skip {
+  type ipv4_addr
+  flags interval
+  elements = {
+    127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 
+    169.254.0.0/16, 224.0.0.0/4, 240.0.0.0/4
+  }
+}
+
+set xray_v6_skip {
+  type ipv6_addr
+  flags interval
+  elements = { ::1/128, fc00::/7, fe80::/10, ff00::/8 }
+}
 
 chain xray_preroute {
   type filter hook prerouting priority mangle; policy accept;
 
-  # DNS сначала (UDP/TCP, v4/v6)
-  iifname "tun0" udp dport 53 tproxy ip  to :12345 meta mark set 0x1
-  iifname "tun0" tcp dport 53 tproxy ip  to :12345 meta mark set 0x1
+  # DNS (UDP/TCP, IPv4/IPv6)
+  iifname "tun0" udp dport 53 tproxy ip to :12345 meta mark set 0x1
+  iifname "tun0" tcp dport 53 tproxy ip to :12345 meta mark set 0x1
   iifname "tun0" udp dport 53 tproxy ip6 to :12345 meta mark set 0x1
   iifname "tun0" tcp dport 53 tproxy ip6 to :12345 meta mark set 0x1
 
-  # Остальной TCP/UDP
-  iifname "tun0" ip  daddr @xray_v4_skip return
-  iifname "tun0" meta l4proto { tcp, udp } tproxy ip  to :12345 meta mark set 0x1
+  # Остальной TCP/UDP трафик
+  iifname "tun0" ip daddr @xray_v4_skip return
+  iifname "tun0" meta l4proto { tcp, udp } tproxy ip to :12345 meta mark set 0x1
   iifname "tun0" ip6 daddr @xray_v6_skip return
   iifname "tun0" meta l4proto { tcp, udp } tproxy ip6 to :12345 meta mark set 0x1
 }
@@ -236,37 +275,52 @@ chain xray_accept_mark {
   meta mark 0x1 accept
 }
 NFT
+
 /etc/init.d/firewall restart >/dev/null 2>&1 || true
 
-# ---------- 8) OpenVPN (UDP/TUN) no‑enc + PKI ----------
-say "Готовлю PKI: EasyRSA (если есть) или OpenSSL‑fallback"
+# ---------- 8) OpenVPN (без шифрования) + PKI ----------
+say "Настраиваю OpenVPN (без шифрования) и генерирую PKI"
+
 if command -v easyrsa >/dev/null 2>&1; then
+  # Используем EasyRSA если доступен
   EASYRSA_PKI="/etc/easy-rsa/pki"
-  EASYRSA_BATCH=1 easyrsa init-pki   >/dev/null 2>&1 || true
+  EASYRSA_BATCH=1 easyrsa init-pki >/dev/null 2>&1 || true
   [ -f "$EASYRSA_PKI/ca.crt" ] || EASYRSA_BATCH=1 easyrsa build-ca nopass >/dev/null 2>&1
   [ -f "$EASYRSA_PKI/issued/server.crt" ] || EASYRSA_BATCH=1 easyrsa build-server-full server nopass >/dev/null 2>&1
   [ -f "$EASYRSA_PKI/issued/${CLIENT}.crt" ] || EASYRSA_BATCH=1 easyrsa build-client-full "${CLIENT}" nopass >/dev/null 2>&1
-  mkdir -p /etc/openvpn/pki; cp -r "$EASYRSA_PKI/"* /etc/openvpn/pki/ 2>/dev/null || true
+  mkdir -p /etc/openvpn/pki
+  cp -r "$EASYRSA_PKI/"* /etc/openvpn/pki/ 2>/dev/null || true
 else
-  OVPN_PKI=/etc/openvpn/pki
+  # Fallback на OpenSSL
+  OVPN_PKI="/etc/openvpn/pki"
   mkdir -p "$OVPN_PKI"
   [ -f "$OVPN_PKI/ca.crt" ] || {
     openssl genrsa -out "$OVPN_PKI/ca.key" 4096 >/dev/null 2>&1
-    openssl req -x509 -new -nodes -key "$OVPN_PKI/ca.key" -sha256 -days 3650 -subj "/CN=OpenWrt-CA" -out "$OVPN_PKI/ca.crt" >/dev/null 2>&1
+    openssl req -x509 -new -nodes -key "$OVPN_PKI/ca.key" -sha256 -days 3650 \
+      -subj "/CN=OpenWrt-CA" -out "$OVPN_PKI/ca.crt" >/dev/null 2>&1
   }
   [ -f "$OVPN_PKI/server.crt" ] || {
     openssl genrsa -out "$OVPN_PKI/server.key" 4096 >/dev/null 2>&1
-    openssl req -new -key "$OVPN_PKI/server.key" -subj "/CN=server" -out "$OVPN_PKI/server.csr" >/dev/null 2>&1
-    openssl x509 -req -in "$OVPN_PKI/server.csr" -CA "$OVPN_PKI/ca.crt" -CAkey "$OVPN_PKI/ca.key" -CAcreateserial -out "$OVPN_PKI/server.crt" -days 3650 -sha256 >/dev/null 2>&1
+    openssl req -new -key "$OVPN_PKI/server.key" -subj "/CN=server" \
+      -out "$OVPN_PKI/server.csr" >/dev/null 2>&1
+    openssl x509 -req -in "$OVPN_PKI/server.csr" -CA "$OVPN_PKI/ca.crt" \
+      -CAkey "$OVPN_PKI/ca.key" -CAcreateserial -out "$OVPN_PKI/server.crt" \
+      -days 3650 -sha256 >/dev/null 2>&1
   }
   [ -f "$OVPN_PKI/${CLIENT}.crt" ] || {
     openssl genrsa -out "$OVPN_PKI/${CLIENT}.key" 4096 >/dev/null 2>&1
-    openssl req -new -key "$OVPN_PKI/${CLIENT}.key" -subj "/CN=${CLIENT}" -out "$OVPN_PKI/${CLIENT}.csr" >/dev/null 2>&1
-    openssl x509 -req -in "$OVPN_PKI/${CLIENT}.csr" -CA "$OVPN_PKI/ca.crt" -CAkey "$OVPN_PKI/ca.key" -CAcreateserial -out "$OVPN_PKI/${CLIENT}.crt" -days 3650 -sha256 >/dev/null 2>&1
+    openssl req -new -key "$OVPN_PKI/${CLIENT}.key" -subj "/CN=${CLIENT}" \
+      -out "$OVPN_PKI/${CLIENT}.csr" >/dev/null 2>&1
+    openssl x509 -req -in "$OVPN_PKI/${CLIENT}.csr" -CA "$OVPN_PKI/ca.crt" \
+      -CAkey "$OVPN_PKI/ca.key" -CAcreateserial -out "$OVPN_PKI/${CLIENT}.crt" \
+      -days 3650 -sha256 >/dev/null 2>&1
   }
 fi
+
+# Генерация TLS-crypt ключа
 openvpn --genkey secret /etc/openvpn/pki/tc.key 2>/dev/null || true
 
+# Настройка OpenVPN сервера
 OVPN4="${VPN4_NET%/*}"
 MASK4="$(cidr2mask "$VPN4_NET")"
 
@@ -288,21 +342,32 @@ uci set openvpn.rw.data_ciphers_fallback='none'
 uci set openvpn.rw.auth='none'
 uci set openvpn.rw.tls_server='1'
 uci set openvpn.rw.ca='/etc/openvpn/pki/ca.crt'
-uci set openvpn.rw.cert='/etc/openvpn/pki/issued/server.crt' 2>/dev/null || uci set openvpn.rw.cert='/etc/openvpn/pki/server.crt'
-uci set openvpn.rw.key='/etc/openvpn/pki/private/server.key' 2>/dev/null || uci set openvpn.rw.key='/etc/openvpn/pki/server.key'
+
+# Определение правильных путей к сертификатам
+if [ -f "/etc/openvpn/pki/issued/server.crt" ]; then
+  uci set openvpn.rw.cert='/etc/openvpn/pki/issued/server.crt'
+  uci set openvpn.rw.key='/etc/openvpn/pki/private/server.key'
+else
+  uci set openvpn.rw.cert='/etc/openvpn/pki/server.crt'
+  uci set openvpn.rw.key='/etc/openvpn/pki/server.key'
+fi
+
 uci set openvpn.rw.dh='none'
 uci add_list openvpn.rw.push='redirect-gateway def1 ipv6'
 uci add_list openvpn.rw.push='dhcp-option DNS 10.99.0.1'
 uci add_list openvpn.rw.push='dhcp-option DNS6 fd42:4242:4242:1::1'
 uci set openvpn.rw.tls_crypt='/etc/openvpn/pki/tc.key'
 uci commit openvpn
+
 /etc/init.d/openvpn enable >/dev/null 2>&1
 /etc/init.d/openvpn restart >/dev/null 2>&1
 
-# Публичный IPv4 для .ovpn — определить ДО cat
-PUB4="$(ip -4 addr show dev "$WAN_IF" | awk '/inet /{print $2}' | head -n1 | cut -d/ -f1)"
+# Получение публичного IP для .ovpn файла
+PUB4="$(ip -4 addr show dev "$WAN_IF" 2>/dev/null | awk '/inet /{print $2}' | head -n1 | cut -d/ -f1)"
+[ -z "$PUB4" ] && PUB4="YOUR_SERVER_IP"
 
-cat >/root/${CLIENT}.ovpn <<EOCLI
+# Создание клиентского конфига
+cat >"/root/${CLIENT}.ovpn" <<EOCLI
 client
 dev tun
 proto udp
@@ -321,15 +386,17 @@ $(cat /etc/openvpn/pki/tc.key 2>/dev/null)
 $(cat /etc/openvpn/pki/ca.crt)
 </ca>
 <cert>
-$(cat /etc/openvpn/pki/issued/${CLIENT}.crt 2>/dev/null || cat /etc/openvpn/pki/${CLIENT}.crt)
+$(cat /etc/openvpn/pki/issued/${CLIENT}.crt 2>/dev/null || cat /etc/openvpn/pki/${CLIENT}.crt 2>/dev/null)
 </cert>
 <key>
-$(cat /etc/openvpn/pki/private/${CLIENT}.key 2>/dev/null || cat /etc/openvpn/pki/${CLIENT}.key)
+$(cat /etc/openvpn/pki/private/${CLIENT}.key 2>/dev/null || cat /etc/openvpn/pki/${CLIENT}.key 2>/dev/null)
 </key>
 EOCLI
 
-# ---------- 9) Firewall ----------
-say "Настраиваю firewall (зона VPN, NAT v4/v6, порт ${OPORT}/udp)"
+# ---------- 9) Firewall настройки ----------
+say "Настраиваю firewall (зона VPN, NAT, порт ${OPORT}/udp)"
+
+# Создание интерфейса VPN
 uci -q delete network.vpn
 uci add network interface
 uci set network.@interface[-1].ifname='tun0'
@@ -338,6 +405,7 @@ uci set network.@interface[-1].auto='1'
 uci rename network.@interface[-1]='vpn'
 uci commit network
 
+# Создание зоны VPN
 uci -q delete firewall.vpn
 uci add firewall zone
 uci set firewall.@zone[-1].name='vpn'
@@ -348,18 +416,21 @@ uci set firewall.@zone[-1].forward='ACCEPT'
 uci set firewall.@zone[-1].masq='1'
 uci set firewall.@zone[-1].mtu_fix='1'
 
+# Настройка MASQUERADE для WAN зоны
 WZ="$(wan_zone_idx)"
 if [ -n "$WZ" ]; then
   uci set firewall.@zone[$WZ].masq='1'
   uci set firewall.@zone[$WZ].masq6='1'
 else
-  warn "Не нашёл WAN‑зону — masq/masq6 пропускаю."
+  warn "Не удалось найти WAN зону - пропускаю настройку MASQUERADE"
 fi
 
+# Forwarding между VPN и WAN
 uci add firewall forwarding
 uci set firewall.@forwarding[-1].src='vpn'
 uci set firewall.@forwarding[-1].dest='wan'
 
+# Правило для OpenVPN порта
 uci add firewall rule
 uci set firewall.@rule[-1].name='Allow-OpenVPN'
 uci set firewall.@rule[-1].src='wan'
@@ -369,51 +440,70 @@ uci set firewall.@rule[-1].target='ACCEPT'
 
 uci commit firewall
 /etc/init.d/firewall restart >/dev/null 2>&1
+
+# Включение IPv6 forwarding
 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
 
-# ---------- 10) TTL (интерактив) ----------
-say "TTL‑фикс"
+# ---------- 10) TTL настройки ----------
+say "Настройка TTL"
 echo " 1) Не менять TTL"
-echo " 2) Компенсировать +1 (ttl=ttl+1; hoplimit=+1)"
+echo " 2) Компенсировать +1 (ttl=ttl+1; hoplimit=+1)"  
 echo " 3) Зафиксировать TTL (по умолчанию 127)"
 printf "Выбор [1/2/3, по умолчанию 3]: "
-read -r TTLMODE; [ -z "$TTLMODE" ] && TTLMODE=3
+read -r TTLMODE
+[ -z "$TTLMODE" ] && TTLMODE=3
+
 case "$TTLMODE" in
   1)
     rm -f /etc/nftables.d/95-ttlfix.nft
-    /etc/init.d/firewall restart >/dev/null 2>&1
+    say "TTL не изменяется"
     ;;
   2)
-    cat >/etc/nftables.d/95-ttlfix.nft <<NFT2
+    cat >/etc/nftables.d/95-ttlfix.nft <<'NFT2'
 # include внутрь table inet fw4
 chain xrl_ttl_post {
   type route hook postrouting priority mangle; policy accept;
-  oifname "${WAN_IF}" ip ttl set ip ttl + 1; ip6 hoplimit set ip6 hoplimit + 1
+  oifname "${WAN_IF}" ip ttl set ip ttl + 1
+  oifname "${WAN_IF}" ip6 hoplimit set ip6 hoplimit + 1
 }
 NFT2
-    /etc/init.d/firewall restart >/dev/null 2>&1
+    say "TTL компенсация +1 настроена"
     ;;
   3|*)
-    printf "TTL значение (Enter=127): "; read -r TTLV; [ -z "$TTLV" ] && TTLV=127
+    printf "TTL значение (Enter=127): "
+    read -r TTLV
+    [ -z "$TTLV" ] && TTLV=127
     cat >/etc/nftables.d/95-ttlfix.nft <<NFT3
-# include внутрь table inet fw4
+# include внутрь table inet fw4  
 chain xrl_ttl_post {
   type route hook postrouting priority mangle; policy accept;
-  oifname "${WAN_IF}" ip ttl set ${TTLV}; ip6 hoplimit set ${TTLV}
+  oifname "${WAN_IF}" ip ttl set ${TTLV}
+  oifname "${WAN_IF}" ip6 hoplimit set ${TTLV}
 }
 NFT3
-    /etc/init.d/firewall restart >/dev/null 2>&1
+    say "TTL зафиксирован на $TTLV"
     ;;
 esac
 
+/etc/init.d/firewall restart >/dev/null 2>&1
+
 # ---------- 11) Итоги ----------
-say "ГОТОВО!"
-IP4="$(ip -4 addr show dev "$WAN_IF" | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1)"
-IP6="$(ip -6 addr show dev "$WAN_IF" scope global | awk '/inet6 /{print $2}' | cut -d/ -f1)"
-echo "LuCI (HTTPS): https://${IP4}"
+say "Настройка завершена!"
+IP4="$(ip -4 addr show dev "$WAN_IF" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1)"
+IP6="$(ip -6 addr show dev "$WAN_IF" scope global 2>/dev/null | awk '/inet6 /{print $2}' | cut -d/ -f1 | head -n1)"
+
+echo ""
+echo "=== ИНФОРМАЦИЯ ДЛЯ ДОСТУПА ==="
+[ -n "$IP4" ] && echo "LuCI (IPv4): https://${IP4}"
 [ -n "$IP6" ] && echo "LuCI (IPv6): https://[${IP6}]/"
-echo "Учётка LuCI/SSH: root ; пароль: ${PW_STATUS}"
-echo "Passwall (если установлен): LuCI → Services → Passwall"
-echo "OpenVPN профиль (клиент): /root/${CLIENT}.ovpn"
-echo "Проверка TPROXY:  nft list ruleset | sed -n '/xray_preroute/,/}/p'"
-echo "Логи: Xray /var/log/xray/*.log | OpenVPN 'logread -e openvpn'"
+echo "Учётные данные: root / ${PW_STATUS}"
+[ "$INSTALL_PW" -eq 1 ] && echo "Passwall: LuCI → Services → Passwall"
+echo "OpenVPN клиентский файл: /root/${CLIENT}.ovpn"
+echo ""
+echo "=== КОМАНДЫ ДЛЯ ПРОВЕРКИ ==="
+echo "Проверка TPROXY: nft list ruleset | grep -A 20 'chain xray_preroute'"
+echo "Логи Xray: tail -f /var/log/xray/error.log"
+echo "Логи OpenVPN: logread -e openvpn"
+echo "Статус сервисов: /etc/init.d/xray status && /etc/init.d/openvpn status"
+echo ""
+say "Не забудьте скачать /root/${CLIENT}.ovpn для подключения клиентов!"
