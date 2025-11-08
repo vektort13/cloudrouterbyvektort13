@@ -76,9 +76,13 @@ fi
 if [ "$AUTOXR" = "Y" ] || [ "$AUTOXR" = "y" ]; then
   say "Добавляю репозиторий Passwall (x86_64) и ставлю GUI"
   
-  # 1. Добавляем фиды
-  echo "src/gz passwall_packages https://raw.githubusercontent.com/xiaorouji/openwrt-passwall-packages/master/x86_64/packages" >> /etc/opkg/custom.conf
-  echo "src/gz passwall_luci https://raw.githubusercontent.com/xiaorouji/openwrt-passwall-packages/master/x86_64/luci" >> /etc/opkg/custom.conf
+  # 0. Очищаем старые/битые ссылки (с 'master'), если они есть
+  sed -i '/passwall_packages/d' /etc/opkg/custom.conf 2>/dev/null
+  sed -i '/passwall_luci/d' /etc/opkg/custom.conf 2>/dev/null
+
+  # 1. Добавляем ПРАВИЛЬНЫЕ фиды (с веткой 'main')
+  echo "src/gz passwall_packages https://raw.githubusercontent.com/xiaorouji/openwrt-passwall-packages/main/x86_64/packages" >> /etc/opkg/custom.conf
+  echo "src/gz passwall_luci https://raw.githubusercontent.com/xiaorouji/openwrt-passwall-packages/main/x86_64/luci" >> /etc/opkg/custom.conf
   
   # 2. Обновляем и ставим
   opkg update || true
@@ -258,7 +262,7 @@ $(cat /etc/openvpn/pki/ca.crt)
 $(cat /etc/openvpn/pki/issued/${CLIENT}.crt 2>/dev/null || cat /etc/openvpn/pki/${CLIENT}.crt)
 </cert>
 <key>
-$(cat /etc/openvpn/pki/private/${CLIENT}.key 2>/dev/null || cat /etc/openvpn/pki/${CLIENT}.key)
+$(cat /etc/openvpn/pki/private/${CLIENT}.key 2>/dev/null || cat /etc/openGvpn/pki/${CLIENT}.key)
 </key>
 EOCLI
 
