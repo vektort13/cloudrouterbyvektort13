@@ -1,3 +1,4 @@
+cat >/root/road-warrior.sh <<'EOF'
 #!/bin/sh
 # Road-Warrior for OpenWrt 24.10.x (x86_64)
 # LuCI + (опц.) luci-app-xray + Xray(TPROXY+DNS) + OpenVPN (no-enc) + IPv6 + интерактив TTL
@@ -13,7 +14,7 @@ cidr2mask() { bits="${1#*/}"; [ -z "$bits" ] && { echo 255.255.255.0; return; }
   printf "%d.%d.%d.%d" $(( (m>>24)&255 )) $(( (m>>16)&255 )) $(( (m>>8)&255 )) $(( m&255 )); }
 wan_zone_idx(){ uci show firewall 2>/dev/null | sed -n "s/^firewall\.@zone\[\([0-9]\+\)\]\.name='wan'.*/\1/p" | head -n1; }
 
-ask_def() { # ask_def "Вопрос" "значение_по_умолчанию" -> stdout=ответ/дефолт
+ask_def() { # ask_def "Вопрос" "дефолт" -> stdout=ответ/дефолт
   prompt="$1"; def="$2"
   printf "%s [%s]: " "$prompt" "$def"
   read ans
@@ -32,13 +33,9 @@ ask_yn() { # ask_yn "Вопрос" "Y|N"
 
 set_root_password() {
   say "Установка пароля root (для SSH и LuCI)"
-  printf "Введите новый пароль (символы не отображаются): "
-  stty -echo 2>/dev/null
-  read P1
-  stty echo 2>/dev/null; printf "\nПовторите пароль: "
-  stty -echo 2>/dev/null
-  read P2
-  stty echo 2>/dev/null; printf "\n"
+  printf "Новый пароль (символы не отображаются): "
+  stty -echo 2>/dev/null; read P1; stty echo 2>/dev/null; printf "\nПовторите пароль: "
+  stty -echo 2>/dev/null; read P2; stty echo 2>/dev/null; printf "\n"
   if [ -n "$P1" ] && [ "$P1" = "$P2" ]; then
     printf "%s\n%s\n" "$P1" "$P1" | passwd root >/dev/null 2>&1 && say "Пароль root задан."
     ROOT_PASS_SET=1
@@ -61,16 +58,16 @@ if ! has_v4; then
 fi
 
 # ---------- 1) Интерактивные параметры ----------
-say "== Параметры OpenVPN & сети =="
+say "== Параметры OpenVPN и сети =="
 OPORT="$(ask_def 'Порт OpenVPN (UDP)' '1194')"
 VPN4_NET="$(ask_def 'Подсеть VPN IPv4 (CIDR)' '10.99.0.0/24')"
 VPN6_NET="$(ask_def 'Подсеть VPN IPv6 (ULA CIDR)' 'fd42:4242:4242:1::/64')"
-CLIENT="$(ask_def 'Имя OpenVPN-клиента' 'client1')"
+CLIENT="$(ask_def 'Имя OpenVPN‑клиента' 'client1')"
 
 say "== LuCI / Xray GUI =="
 if ask_yn "Пытаться автоматически поставить luci-app-xray (GUI для Xray)?" "Y"; then
   INSTALL_LUCI_XRAY=1
-  if ask_yn "Если GitHub вернёт 404 — спросить у вас прямую ссылку .ipk и поставить с неё?" "Y"; then
+  if ask_yn "Если GitHub вернёт 404 — спросить прямую ссылку .ipk и поставить с неё?" "Y"; then
     LUCI_XRAY_URL_FALLBACK=1
   fi
 else
@@ -88,7 +85,7 @@ fi
 say "Чиню distfeeds (packages-24.10) и обновляю индексы"
 cp /etc/opkg/distfeeds.conf /etc/opkg/distfeeds.conf.bak 2>/dev/null
 sed -i 's#https://downloads.openwrt.org/releases/[0-9.]\+/packages/x86_64/#https://downloads.openwrt.org/releases/packages-24.10/x86_64/#g' /etc/opkg/distfeeds.conf
-opkg update || warn "opkg update вернул ошибку (продолжаю)"
+opkg update || warn "opkg update вернул ошибку — продолжаю"
 
 # ---------- 3) Пакеты ----------
 say "Устанавливаю пакеты (LuCI, Xray, OpenVPN, nft tproxy, dnsmasq-full, утилиты)"
@@ -105,7 +102,7 @@ mkdir -p /etc/nftables.d
 /etc/init.d/uhttpd enable 2>/dev/null; /etc/init.d/uhttpd start 2>/dev/null
 
 if [ "$INSTALL_LUCI_XRAY" = "1" ]; then
-  say "Ставлю luci-app-xray (GUI для Xray)"
+  say "Ставлю luci-app-xray (GUI)"
   opkg install luci-app-xray 2>/dev/null || true
   if ! opkg list-installed | grep -q '^luci-app-xray'; then
     warn "luci-app-xray нет в фидах — пытаюсь взять из Releases"
@@ -113,15 +110,14 @@ if [ "$INSTALL_LUCI_XRAY" = "1" ]; then
     HDRS="-H Accept:application/vnd.github+json -H User-Agent:curl/8"
     [ -n "$GITHUB_TOKEN" ] && HDRS="$HDRS -H Authorization:Bearer\ $GITHUB_TOKEN"
     URL="$(eval curl -fsSL $HDRS https://api.github.com/repos/yichya/luci-app-xray/releases/latest 2>/dev/null \
-          | jq -r '.assets[]?.browser_download_url' \
-          | grep -E 'luci-app-xray_.*_all\.ipk$' | head -n1)"
+          | jq -r '.assets[]?.browser_download_url' | grep -E 'luci-app-xray_.*_all\.ipk$' | head -n1)"
     if [ -z "$URL" ]; then
       REL=$(curl -fsSL -H 'User-Agent:Mozilla/5.0' https://github.com/yichya/luci-app-xray/releases/latest 2>/dev/null | tr '\n' ' ')
       URL=$(echo "$REL" | grep -Eo '/yichya/luci-app-xray/releases/download/[^"]*luci-app-xray_[^"]*_all\.ipk' | head -n1)
       [ -n "$URL" ] && URL="https://github.com$URL"
     fi
     if [ -n "$URL" ]; then
-      wget -O /tmp/luci-app-xray.ipk "$URL" 2>/dev/null && opkg install /tmp/luci-app-xray.ipk || warn "Не удалось поставить luci-app-xray из Releases."
+      wget -O /tmp/luci-app-xray.ipk "$URL" 2>/dev/null && opkg install /tmp/luci-app-xray.ipk || warn "Не удалось поставить из Releases."
     else
       warn "Автоскачивание .ipk не удалось."
       if [ "$LUCI_XRAY_URL_FALLBACK" = "1" ]; then
@@ -213,7 +209,7 @@ chain xray_accept_mark {
 NFT
 /etc/init.d/firewall restart 2>/dev/null || true
 
-# ---------- 8) OpenVPN (UDP/TUN) без шифрования + PKI (идемпотентно) ----------
+# ---------- 8) OpenVPN (UDP/TUN) без шифрования + PKI ----------
 say "Готовлю PKI (EasyRSA/OpenSSL)"
 EASYRSA_DIR="/etc/easy-rsa"; EASYRSA_PKI="$EASYRSA_DIR/pki"; mkdir -p "$EASYRSA_DIR" "$EASYRSA_PKI"
 if opkg list-installed | grep -q '^openvpn-easy-rsa'; then
@@ -224,7 +220,7 @@ if opkg list-installed | grep -q '^openvpn-easy-rsa'; then
   [ -f "$EASYRSA_PKI/issued/${CLIENT}.crt" ] || EASYRSA_BATCH=1 EASYRSA_PKI="$EASYRSA_PKI" "$EASYRSA_BIN" build-client-full "$CLIENT" nopass >/dev/null 2>&1
   mkdir -p /etc/openvpn/pki; cp -r "$EASYRSA_PKI/"* /etc/openvpn/pki/ 2>/dev/null || true
 else
-  OVPN_PKI=/etc/openvpn/pki; mkdir -p "$OVPN_PKI"
+  OVPN_PKI=/etc/openvpn/pki; mkdir -п "$OVPN_PKI"
   [ -f "$OVPN_PKI/ca.crt" ] || { openssl genrsa -out "$OVPN_PKI/ca.key" 4096 >/dev/null 2>&1
     openssl req -x509 -new -nodes -key "$OVPN_PKI/ca.key" -sha256 -days 3650 -subj "/CN=OpenWrt-CA" -out "$OVPN_PKI/ca.crt" >/dev/null 2>&1; }
   [ -f "$OVPN_PKI/server.crt" ] || { openssl genrsa -out "$OVPN_PKI/server.key" 4096 >/dev/null 2>&1
@@ -373,10 +369,14 @@ IP6="$(ip -6 addr show dev "$WAN_IF" scope global | awk '/inet6 /{print $2}' | c
 
 say "ГОТОВО!"
 echo "• LuCI по VPN:             https://10.99.0.1  (после подключения OpenVPN)"
-echo "• LuCI по WAN (может быть недоступен фаерволом): https://${IP4}"
+echo "• LuCI по WAN (может блокироваться фаерволом): https://${IP4}"
 [ -n "$IP6" ] && echo "• LuCI по IPv6:            https://[${IP6}]/"
-echo "• Логин/пароль LuCI/SSH:   root / $( [ "$ROOT_PASS_SET" = "1" ] && echo '(установлен)' || echo '(если не задан — выполните passwd)' )"
-echo "• Xray GUI:                LuCI → Services → Xray (после установки luci-app-xray)"
-echo "• OpenVPN профиль:         /root/${CLIENT}.ovpn (импортируйте в OpenVPN GUI 2.5/2.6 на Windows)"
+echo "• Логин/пароль LuCI/SSH:   root / $( [ \"$ROOT_PASS_SET\" = \"1\" ] && echo 'установлен' || echo 'не задан — выполните passwd' )"
+echo "• Xray GUI:                LuCI → Services → Xray (если luci-app-xray установлен)"
+echo "• OpenVPN профиль:         /root/${CLIENT}.ovpn (импортируйте в OpenVPN GUI 2.5/2.6)"
 echo "• Проверка TPROXY:         nft list ruleset | sed -n '/xray_preroute/,/}/p'"
 echo "• Логи:                    tail -f /var/log/xray/access.log  |  logread -e openvpn"
+EOF
+
+chmod +x /root/road-warrior.sh
+sh /root/road-warrior.sh
