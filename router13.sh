@@ -1,11 +1,9 @@
 #!/bin/sh
 # Road-Warrior for OpenWrt 24.10.x (x86_64)
-# LuCI + (опц.) Passwall/Passwall2 (GUI для Xray) + Xray(TPROXY+DNS)
-# + OpenVPN (no-enc) + IPv6 + интерактивный TTL
+# LuCI + (опц.) Passwall GUI + Xray(TPROXY+DNS) + OpenVPN (no-enc) + IPv6 + интерактив TTL
 
 say()  { printf "\033[1;32m[RW]\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m[RW]\033[0m %s\n" "$*"; }
-err()  { printf "\033[1;31m[RW]\033[0m %s\n" "$*"; }
 
 # ---------- helpers ----------
 ask_var() { # ask_var "Вопрос" VAR "дефолт"
@@ -22,15 +20,14 @@ ask_yn() { # ask_yn "Вопрос" "Y|N"
   [ -z "$a" ] && a="$def"
   case "$a" in Y|y) return 0;; *) return 1;; esac
 }
-cidr2mask() { # "10.99.0.0/24" -> "255.255.255.0"
-  bits="${1#*/}"; [ -z "$bits" ] && { echo 255.255.255.0; return; }
+cidr2mask() { bits="${1#*/}"; [ -z "$bits" ] && { echo 255.255.255.0; return; }
   m=0; i=0; while [ $i -lt 32 ]; do [ $i -lt "$bits" ] && m=$((m | (1<<(31-i)))); i=$((i+1)); done
   printf "%d.%d.%d.%d" $(( (m>>24)&255 )) $(( (m>>16)&255 )) $(( (m>>8)&255 )) $(( m&255 ))
 }
 wan_zone_idx(){ uci show firewall 2>/dev/null | sed -n "s/^firewall\.@zone\[\([0-9]\+\)\]\.name='wan'.*/\1/p" | head -n1; }
 has_v4(){ ip -4 addr show dev "$WAN_IF" | grep -q 'inet '; }
 
-# ---------- 0) Приветствие + интерактив ----------
+# ---------- 0) Приветствие + ввод ----------
 say "Интерактивный мастер настройки (вводи значение и жми Enter; дефолт — в [] )"
 
 # Автодетект WAN
@@ -60,12 +57,12 @@ else
 fi
 
 INSTALL_PW=0
-if ask_yn "Пытаться автоматически поставить Passwall/Passwall2 (GUI для Xray)?" "Y"; then
+if ask_yn "Поставить Passwall/Passwall2 (GUI для Xray) автоматически?" "Y"; then
   INSTALL_PW=1
 fi
 
 # ---------- 1) distfeeds + базовые пакеты ----------
-say "Обновляю списки пакетов и ставлю зависимости"
+say "Обновляю фиды и ставлю зависимости"
 cp /etc/opkg/distfeeds.conf /etc/opkg/distfeeds.conf.bak 2>/dev/null || true
 sed -i 's#https://downloads.openwrt.org/releases/[0-9.]\+/packages/x86_64/#https://downloads.openwrt.org/releases/packages-24.10/x86_64/#g' /etc/opkg/distfeeds.conf
 opkg update || true
@@ -87,48 +84,79 @@ if ! has_v4; then
   uci commit network; /etc/init.d/network restart; sleep 4
 fi
 
-# ---------- 3) (опц.) Passwall/Passwall2 из SourceForge ----------
+# ---------- 3) Passwall фиды (SourceForge) + установка ----------
 add_passwall_feeds() {
-  # гигиена: убираем старое
-  sed -i '/openwrt-passwall-build/d;/^src\/gz passwall_/d;/^src\/gz passwall2/d' /etc/opkg/custom.conf 2>/dev/null
+  # подчистить старые записи в обоих файлах
+  for f in /etc/opkg/customfeeds.conf /etc/opkg/custom.conf; do
+    [ -f "$f" ] || continue
+    sed -i '/openwrt-passwall-build/d;/passwall_packages/d;/passwall_luci/d;/passwall2/d' "$f"
+  done
 
-  # база для текущего релиза/архитектуры
-  REL="$((. /etc/openwrt_release 2>/dev/null; echo "$DISTRIB_RELEASE"))"
-  RELMAJ="$(echo "$REL" | awk -F. '{print $1"."$2}')"
-  ARCH_DIR="$(uname -m)" # x86_64
-  SF_BASE="https://downloads.sourceforge.net/project/openwrt-passwall-build/releases/packages-$RELMAJ/$ARCH_DIR"
+  # читаем релиз/арх
+  . /etc/openwrt_release 2>/dev/null || true
+  REL="${DISTRIB_RELEASE:-24.10}"           # например 24.10.4
+  RELMAJ="${REL%.*}"                        # -> 24.10
+  ARCH="${DISTRIB_ARCH:-$(uname -m)}"       # x86_64
 
-  # ключ подписи пакетов
+  # база SourceForge (реальный бинарный фид)
+  SF_BASE="https://downloads.sourceforge.net/project/openwrt-passwall-build/releases/packages-${RELMAJ}/${ARCH}"
+
+  # добавить ключ подписи (если не скачался — не падаем)
   mkdir -p /etc/opkg/keys
-  PASSWALL_KEY_URL="https://ftp.iij.ad.jp/pub/sourceforge.jp/storage/g/o/op/openwrt-passwall-build/passwall.pub"
-  uclient-fetch -q -T 15 -O /etc/opkg/keys/passwall.pub "$PASSWALL_KEY_URL" 2>/dev/null || \
-    warn "Не удалось скачать public key passwall.pub — при ошибке подписи поставьте ключ вручную."
+  for U in \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/passwall.pub" \
+    "https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub"
+  do
+    uclient-fetch -q -T 20 -O /etc/opkg/keys/passwall.pub "$U" && break
+    wget -q -O /etc/opkg/keys/passwall.pub "$U" && break
+  done
+  opkg-key add /etc/opkg/keys/passwall.pub >/dev/null 2>&1 || true
 
-  FEEDS=""
-  for d in passwall_packages passwall2 passwall_luci; do
-    URL="$SF_BASE/$d/Packages.gz"
-    if uclient-fetch -q -T 15 -O /dev/null "$URL" 2>/dev/null; then
-      echo "src/gz $d $SF_BASE/$d" >> /etc/opkg/custom.conf
-      FEEDS="$FEEDS $d"
+  # детектируем реально существующие каталоги
+  ADDED=0
+  for d in passwall_packages passwall_luci passwall2; do
+    if uclient-fetch -q -T 15 -O /dev/null "$SF_BASE/$d/Packages.gz"; then
+      echo "src/gz $d $SF_BASE/$d" >> /etc/opkg/customfeeds.conf
+      ADDED=1
     fi
   done
 
-  if [ -n "$FEEDS" ]; then
-    say "Добавлены фиды Passwall:$FEEDS"
-    opkg update || true
-    opkg install luci-app-passwall2 2>/dev/null || opkg install luci-app-passwall 2>/dev/null || \
-      warn "GUI Passwall не поставился — можно позже через LuCI → System → Software (Upload)."
-  else
-    warn "Фиды Passwall недоступны — пропускаю автоустановку GUI."
-  fi
+  [ "$ADDED" -eq 1 ] || return 1
+  return 0
+}
+
+install_passwall_from_feed() {
+  opkg update || return 1
+  opkg install luci-app-passwall 2>/dev/null || opkg install luci-app-passwall2 2>/dev/null || return 2
+  return 0
+}
+
+install_passwall_fallback_zip() {
+  # большой ZIP; ставим только если согласился
+  say "Fallback: тяну ZIP из GitHub releases (passwall2), это 60–70 MB…"
+  URL="$(curl -fsSL -H 'User-Agent: curl' https://api.github.com/repos/xiaorouji/openwrt-passwall2/releases/latest \
+        | jq -r '.assets[]?|select(.name|test("passwall_packages_ipk_x86_64.zip$")).browser_download_url')"
+  [ -n "$URL" ] || return 1
+  mkdir -p /tmp/pw
+  uclient-fetch -T 300 -O /tmp/pw/pw.zip "$URL" || wget -O /tmp/pw/pw.zip "$URL" || return 2
+  (cd /tmp/pw && unzip -o pw.zip >/dev/null 2>&1) || return 3
+  opkg install /tmp/pw/*.ipk || true
+  return 0
 }
 
 if [ "$INSTALL_PW" -eq 1 ]; then
-  say "Пробую добавить фиды Passwall (SourceForge) и поставить GUI"
-  add_passwall_feeds
+  say "Добавляю фиды Passwall и ставлю GUI"
+  if add_passwall_feeds && install_passwall_from_feed; then
+    say "Passwall GUI установлен из фида."
+  else
+    warn "Из фида не встало."
+    if ask_yn "Пробовать ZIP‑fallback из GitHub (большой файл)?" "N"; then
+      install_passwall_fallback_zip || warn "ZIP‑fallback тоже не удался. Можно поставить ipk вручную."
+    fi
+  fi
 fi
 
-# ---------- 4) Включаем LuCI (HTTPS) ----------
+# ---------- 4) LuCI ----------
 /etc/init.d/uhttpd enable >/dev/null 2>&1
 /etc/init.d/uhttpd start  >/dev/null 2>&1
 
@@ -162,8 +190,7 @@ say "Policy routing: fwmark 0x1 -> table 100 (local dev lo)"
 ip rule add fwmark 0x1 table 100 2>/dev/null || true
 ip route add local 0.0.0.0/0 dev lo table 100 2>/dev/null || true
 ip -6 rule add fwmark 0x1 table 100 2>/dev/null || true
-ip -6 route add local ::/0   dev lo table 100 2>/dev/null || true
-
+ip -6 route add local ::/0 dev lo table 100 2>/dev/null || true
 mkdir -p /etc/hotplug.d/iface
 cat >/etc/hotplug.d/iface/99-xray-tproxy <<'HPL'
 [ "$ACTION" = ifup ] || exit 0
@@ -182,7 +209,7 @@ chmod +x /etc/hotplug.d/iface/99-xray-tproxy
 say "Вкатываю nft‑правила TPROXY (prerouting на tun0 → :12345)"
 mkdir -p /etc/nftables.d
 cat >/etc/nftables.d/90-xray-tproxy.nft <<'NFT'
-# Этот файл включается ВНУТРЬ table inet fw4
+# Этот файл включается внутрь table inet fw4
 set xray_v4_skip { type ipv4_addr; flags interval; elements = {
   127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 240.0.0.0/4
 } }
@@ -213,13 +240,12 @@ NFT
 
 # ---------- 8) OpenVPN (UDP/TUN) no‑enc + PKI ----------
 say "Готовлю PKI: EasyRSA (если есть) или OpenSSL‑fallback"
-
 if command -v easyrsa >/dev/null 2>&1; then
   EASYRSA_PKI="/etc/easy-rsa/pki"
   EASYRSA_BATCH=1 easyrsa init-pki   >/dev/null 2>&1 || true
-  [ -f "$EASYRSA_PKI/ca.crt" ]                || EASYRSA_BATCH=1 easyrsa build-ca nopass >/dev/null 2>&1
-  [ -f "$EASYRSA_PKI/issued/server.crt" ]     || EASYRSA_BATCH=1 easyrsa build-server-full server nopass >/dev/null 2>&1
-  [ -f "$EASYRSA_PKI/issued/${CLIENT}.crt" ]  || EASYRSA_BATCH=1 easyrsa build-client-full "${CLIENT}" nopass >/dev/null 2>&1
+  [ -f "$EASYRSA_PKI/ca.crt" ] || EASYRSA_BATCH=1 easyrsa build-ca nopass >/dev/null 2>&1
+  [ -f "$EASYRSA_PKI/issued/server.crt" ] || EASYRSA_BATCH=1 easyrsa build-server-full server nopass >/dev/null 2>&1
+  [ -f "$EASYRSA_PKI/issued/${CLIENT}.crt" ] || EASYRSA_BATCH=1 easyrsa build-client-full "${CLIENT}" nopass >/dev/null 2>&1
   mkdir -p /etc/openvpn/pki; cp -r "$EASYRSA_PKI/"* /etc/openvpn/pki/ 2>/dev/null || true
 else
   OVPN_PKI=/etc/openvpn/pki
@@ -273,7 +299,7 @@ uci commit openvpn
 /etc/init.d/openvpn enable >/dev/null 2>&1
 /etc/init.d/openvpn restart >/dev/null 2>&1
 
-# WAN IPv4 ДО генерации .ovpn
+# Публичный IPv4 для .ovpn — определить ДО cat
 PUB4="$(ip -4 addr show dev "$WAN_IF" | awk '/inet /{print $2}' | head -n1 | cut -d/ -f1)"
 
 cat >/root/${CLIENT}.ovpn <<EOCLI
@@ -345,7 +371,7 @@ uci commit firewall
 /etc/init.d/firewall restart >/dev/null 2>&1
 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
 
-# ---------- 10) TTL — интерактив ----------
+# ---------- 10) TTL (интерактив) ----------
 say "TTL‑фикс"
 echo " 1) Не менять TTL"
 echo " 2) Компенсировать +1 (ttl=ttl+1; hoplimit=+1)"
@@ -387,7 +413,7 @@ IP6="$(ip -6 addr show dev "$WAN_IF" scope global | awk '/inet6 /{print $2}' | c
 echo "LuCI (HTTPS): https://${IP4}"
 [ -n "$IP6" ] && echo "LuCI (IPv6): https://[${IP6}]/"
 echo "Учётка LuCI/SSH: root ; пароль: ${PW_STATUS}"
-echo "Passwall/Passwall2: LuCI → Services → Passwall (если установлен)"
+echo "Passwall (если установлен): LuCI → Services → Passwall"
 echo "OpenVPN профиль (клиент): /root/${CLIENT}.ovpn"
 echo "Проверка TPROXY:  nft list ruleset | sed -n '/xray_preroute/,/}/p'"
-echo "Логи: Xray /var/log/xray/*.log | OpenVPN: logread -e openvpn"
+echo "Логи: Xray /var/log/xray/*.log | OpenVPN 'logread -e openvpn'"
