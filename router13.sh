@@ -181,74 +181,39 @@ fi
 
 # ---------- 4) Passwall установка ----------
 say "=== Устанавливаем Passwall ==="
-
-install_passwall_feeds() {
-  # Очистка старых записей
-  for f in /etc/opkg/customfeeds.conf /etc/opkg/custom.conf; do
-    [ -f "$f" ] && sed -i '/openwrt-passwall-build/d;/passwall_packages/d;/passwall_luci/d;/passwall2/d' "$f"
-  done
-
-  # Определение релиза и архитектуры
-  . /etc/openwrt_release 2>/dev/null || true
-  REL="${DISTRIB_RELEASE:-24.10}"
-  RELMAJ="${REL%.*}"
-  ARCH="${DISTRIB_ARCH:-$(uname -m)}"
-
-  # База SourceForge
-  SF_BASE="https://downloads.sourceforge.net/project/openwrt-passwall-build/releases/packages-${RELMAJ}/${ARCH}"
-
-  # Загрузка ключа подписи
-  mkdir -p /etc/opkg/keys
-  PASSWALL_KEY_URL="https://raw.githubusercontent.com/xiaorouji/openwrt-passwall/main/signing.key"
-  
-  say "Загружаем ключ Passwall..."
-  if uclient-fetch -q -T 20 -O /etc/opkg/keys/passwall.pub "$PASSWALL_KEY_URL" 2>/dev/null || \
-     wget -q -O /etc/opkg/keys/passwall.pub "$PASSWALL_KEY_URL" 2>/dev/null; then
-    say "✓ Ключ Passwall загружен"
-    opkg-key add /etc/opkg/keys/passwall.pub >/dev/null 2>&1 || true
-  else
-    warn "✗ Не удалось загрузить ключ подписи"
-  fi
-
-  # Проверка доступности фидов
-  ADDED=0
-  for d in passwall_packages passwall_luci passwall2; do
-    say "Проверяем фид: $d"
-    if uclient-fetch -q -T 15 -O /dev/null "$SF_BASE/$d/Packages.gz" 2>/dev/null; then
-      echo "src/gz $d $SF_BASE/$d" >> /etc/opkg/customfeeds.conf
-      say "✓ Добавлен фид: $d"
-      ADDED=$((ADDED + 1))
-    else
-      warn "✗ Фид $d недоступен"
-    fi
-  done
-
-  [ "$ADDED" -gt 0 ] && return 0
-  return 1
-}
-
-install_passwall_from_feed() {
-  say "Устанавливаем Passwall из фидов..."
-  opkg update || return 1
-  if opkg install luci-app-passwall 2>/dev/null; then
-    say "✓ Passwall установлен"
-    return 0
-  elif opkg install luci-app-passwall2 2>/dev/null; then
-    say "✓ Passwall2 установлен"  
-    return 0
-  else
-    warn "✗ Не удалось установить Passwall из фидов"
-    return 2
-  fi
-}
-
-# Установка Passwall
-if install_passwall_feeds && install_passwall_from_feed; then
-  say "✓ Passwall успешно установлен"
+# Ключ подписи именно для сборок на SourceForge
+PASSWALL_KEY_URL="https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub"
+mkdir -p /etc/opkg/keys
+say "Загружаем ключ Passwall build..."
+if uclient-fetch -q -T 20 -O /etc/opkg/keys/passwall.pub "$PASSWALL_KEY_URL" || \
+   wget -q -O /etc/opkg/keys/passwall.pub "$PASSWALL_KEY_URL"; then
+  opkg-key add /etc/opkg/keys/passwall.pub >/dev/null 2>&1 || true
+  say "✓ Ключ добавлен"
 else
-  warn "✗ Passwall не установлен, но продолжаем настройку VPN"
+  warn "✗ Не удалось загрузить ключ подписи (passwall.pub)"
 fi
 
+# Чистим старые записи и жёстко прописываем фиды 24.10/x86_64
+sed -i '/passwall_packages\|passwall_luci\|passwall2/d' /etc/opkg/customfeeds.conf 2>/dev/null
+cat >> /etc/opkg/customfeeds.conf <<'EOF'
+src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-24.10/x86_64/passwall_luci
+src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-24.10/x86_64/passwall_packages
+src/gz passwall2 https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-24.10/x86_64/passwall2
+EOF
+say "✓ Фиды Passwall (24.10/x86_64) добавлены"
+
+# Обновление списков и установка (НЕ прячем stderr, чтобы видеть причину, если будет ошибка)
+say "Обновляем индексы opkg..."
+opkg update || warn "opkg update завершился с ошибкой — проверьте интернет/время/CA"
+
+say "Пробуем установить luci-app-passwall..."
+if opkg install luci-app-passwall; then
+  say "✓ luci-app-passwall установлен"
+else
+  warn "Не вышло, пробуем luci-app-passwall2..."
+  opkg install luci-app-passwall2 && say "✓ luci-app-passwall2 установлен" || \
+    warn "✗ Не удалось установить ни luci-app-passwall, ни luci-app-passwall2"
+fi
 # ---------- 5) Настройка OpenVPN с исправленными сертификатами ----------
 say "=== Настраиваем OpenVPN ==="
 
