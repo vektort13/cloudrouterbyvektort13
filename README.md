@@ -1,4 +1,4 @@
-# AntiDetect Router (alpha)
+# AntiDetect Router (alpha) v.0.1.0
 
 > **Status:** ⚠️ Early alpha – expect bugs, rough edges and sharp corners.  
 > **Author:** Vektor T13  
@@ -63,6 +63,16 @@ This makes the box behave more like an **“AntiDetect edge node”** than just 
 ## Core components
 
 The script wires up the following building blocks:
+
+## Target OS / reference image
+
+AntiDetect Router (alpha) was developed and tested on:
+
+- **OpenWrt 24.10.4 (x86/64)**
+  - Official download tree: `https://downloads.openwrt.org/releases/24.10.4/targets/x86/64/`
+  - Reference image: `generic-ext4-combined-efi.img.gz`
+
+Other OpenWrt 24.10.x x86_64 builds may work, but the image above is the **reference environment** this script was built and verified against.
 
 ### Base system
 
@@ -170,6 +180,7 @@ After running the script you get:
 - `/www/vpn/index.html` — minimal landing page with:
   - download link for the client config,
   - LuCI URL (`https://<VPS_IP>`),
+  - direct VPN config (`https://<VPS_IP>/vpn`),
   - root username and password reminder.
 - `/usr/sbin/rw-fix` — “panic button” to:
   - remove hijacked `/1` default routes on tun+,
